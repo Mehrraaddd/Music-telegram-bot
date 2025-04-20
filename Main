@@ -1,0 +1,104 @@
+import asyncio
+import logging
+import os
+import random
+import sqlite3
+from datetime import datetime, time
+
+from pytz import timezone
+from telegram import Update, Audio
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler, filters, ContextTypes
+)
+
+# ====== تنظیمات ======
+BOT_TOKEN = 'توکن رباتت اینجا'
+CHANNEL_ID = '@channelusername'  # یا ID عددی کانال
+TEHRAN_TZ = timezone('Asia/Tehran')
+
+# ====== لاگ ======
+logging.basicConfig(level=logging.INFO)
+
+# ====== پایگاه داده ======
+conn = sqlite3.connect('songs.db', check_same_thread=False)
+cursor = conn.cursor()
+cursor.execute('''CREATE TABLE IF NOT EXISTS songs
+               (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_id TEXT,
+                sent INTEGER DEFAULT 0)''')
+conn.commit()
+
+# ====== دستورات ======
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("سلام! آهنگ‌هات رو بفرست تا ذخیره کنم.")
+
+async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    file_id = update.message.audio.file_id
+    cursor.execute("INSERT INTO songs (file_id, sent) VALUES (?, 0)", (file_id,))
+    conn.commit()
+    await update.message.reply_text("آهنگ ذخیره شد.")
+
+async def list_songs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cursor.execute("SELECT id, file_id, sent FROM songs")
+    songs = cursor.fetchall()
+    if not songs:
+        await update.message.reply_text("هنوز آهنگی ثبت نشده.")
+    else:
+        text = "\n".join([f"{s[0]} - {'ارسال‌شده' if s[2] else 'در صف'}" for s in songs])
+        await update.message.reply_text(text)
+
+async def delete_song(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) == 0:
+        await update.message.reply_text("لطفاً آیدی آهنگ رو وارد کن.")
+        return
+    try:
+        song_id = int(context.args[0])
+        cursor.execute("DELETE FROM songs WHERE id = ?", (song_id,))
+        conn.commit()
+        await update.message.reply_text("آهنگ حذف شد.")
+    except:
+        await update.message.reply_text("خطا در حذف آهنگ.")
+
+async def clear_songs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cursor.execute("DELETE FROM songs")
+    conn.commit()
+    await update.message.reply_text("همه آهنگ‌ها پاک شدن.")
+
+# ====== زمان‌بندی ارسال ======
+
+async def nightly_job(app: Application):
+    while True:
+        now = datetime.now(TEHRAN_TZ)
+        if now.time().hour == 0 and now.time().minute == 0:
+            cursor.execute("SELECT id, file_id FROM songs WHERE sent = 0")
+            songs = cursor.fetchall()
+            if songs:
+                song = random.choice(songs)
+                try:
+                    await app.bot.send_audio(chat_id=CHANNEL_ID, audio=song[1])
+                    cursor.execute("UPDATE songs SET sent = 1 WHERE id = ?", (song[0],))
+                    conn.commit()
+                except Exception as e:
+                    logging.error(f"خطا در ارسال آهنگ: {e}")
+        await asyncio.sleep(60)  # بررسی هر دقیقه
+
+# ====== اجرای اصلی ======
+
+async def main():
+    app = Application.builder().token(BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("list", list_songs))
+    app.add_handler(CommandHandler("delete", delete_song))
+    app.add_handler(CommandHandler("clear", clear_songs))
+    app.add_handler(MessageHandler(filters.AUDIO, handle_audio))
+
+    # اجرای تسک شبانه
+    asyncio.create_task(nightly_job(app))
+
+    print("ربات فعال شد.")
+    await app.run_polling()
+
+if __name__ == "__main__":
+    asyncio.run(main())
