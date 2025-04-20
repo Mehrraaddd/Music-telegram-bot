@@ -1,118 +1,24 @@
-import logging
-import random
-import sqlite3
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from telegram.constants import ChatMemberStatus
 import asyncio
-from datetime import datetime
+import logging
+import os
+import nest_asyncio
 from keep_alive import keep_alive
+from telegram.ext import Application, CommandHandler
+
+nest_asyncio.apply()
+
+TOKEN = os.getenv("BOT_TOKEN")
 
 logging.basicConfig(level=logging.INFO)
 
-# ====== تنظیمات ======
-BOT_TOKEN = '7696809654:AAH7rg2ldVtORW3EekAGzj3xW4O58Tr7nr0'  # توکن ربات شما
-ADMIN_USER_ID = 1890135936  # آیدی شما به عنوان ادمین
-conn = sqlite3.connect('songs.db', check_same_thread=False)
-cursor = conn.cursor()
+async def start(update, context):
+    await update.message.reply_text("سلام ارباب مهراد!")
 
-# ====== پایگاه داده ======
-cursor.execute('''CREATE TABLE IF NOT EXISTS songs
-               (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT,
-                file_id TEXT,
-                sent INTEGER DEFAULT 0)''')
-cursor.execute('''CREATE TABLE IF NOT EXISTS users
-               (user_id INTEGER PRIMARY KEY,
-                channel_id TEXT)''')
-conn.commit()
-
-# ====== دستورات ======
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "سلام! من ربات مدیریت آهنگ هستم. از دستورات زیر استفاده کن:\n"
-        "/start: شروع\n"
-        "/list: لیست آهنگ‌ها\n"
-        "/status: وضعیت ارسال آهنگ‌ها\n"
-        "/setchannel: تنظیم کانال\n"
-        "/mychannel: مشاهده کانال"
-    )
-
-async def set_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    channel_id = context.args[0] if len(context.args) > 0 else None
-    
-    if not channel_id:
-        await update.message.reply_text("لطفاً آیدی کانال خود را وارد کنید.")
-        return
-
-    # بررسی ادمین بودن کاربر در کانال
-    member = await update.bot.get_chat_member(channel_id, user_id)
-    if member.status != ChatMemberStatus.ADMINISTRATOR:
-        await update.message.reply_text("شما ادمین کانال نیستید.")
-        return
-
-    # ثبت کانال و کاربر
-    cursor.execute("INSERT OR REPLACE INTO users (user_id, channel_id) VALUES (?, ?)", (user_id, channel_id))
-    conn.commit()
-    await update.message.reply_text(f"کانال {channel_id} برای شما ثبت شد.")
-
-async def list_songs(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    cursor.execute("SELECT * FROM songs WHERE sent=0")
-    songs = cursor.fetchall()
-    
-    if not songs:
-        await update.message.reply_text("هیچ آهنگ جدیدی برای ارسال وجود ندارد.")
-        return
-
-    response = "آهنگ‌های جدید:\n"
-    for song in songs:
-        response += f"ID: {song[0]}, Title: {song[1]}\n"
-    
-    await update.message.reply_text(response)
-
-async def send_random_song(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cursor.execute("SELECT * FROM songs WHERE sent=0")
-    songs = cursor.fetchall()
-
-    if not songs:
-        await update.message.reply_text("هیچ آهنگ جدیدی برای ارسال وجود ندارد.")
-        return
-
-    song = random.choice(songs)
-    file_id = song[2]
-    title = song[1]
-    
-    # ارسال آهنگ به کانال
-    user_id = update.effective_user.id
-    cursor.execute("SELECT channel_id FROM users WHERE user_id=?", (user_id,))
-    user_channel = cursor.fetchone()
-    
-    if not user_channel:
-        await update.message.reply_text("شما کانال ثبت نکردید.")
-        return
-
-    channel_id = user_channel[0]
-    await update.bot.send_audio(chat_id=channel_id, audio=file_id, caption=title)
-
-    # به‌روزرسانی وضعیت آهنگ
-    cursor.execute("UPDATE songs SET sent=1 WHERE id=?", (song[0],))
-    conn.commit()
-    await update.message.reply_text(f"آهنگ {title} به کانال {channel_id} ارسال شد.")
-
-# ====== اجرای ربات ======
 async def main():
-    app = Application.builder().token(BOT_TOKEN).build()
-
+    app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("setchannel", set_channel))
-    app.add_handler(CommandHandler("list", list_songs))
-    app.add_handler(CommandHandler("status", send_random_song))
-
+    keep_alive()
     await app.run_polling()
 
 if __name__ == '__main__':
-    keep_alive()
     asyncio.run(main())
