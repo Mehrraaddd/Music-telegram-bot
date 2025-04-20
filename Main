@@ -1,19 +1,25 @@
+
 import asyncio
 import logging
 import os
+import nest_asyncio
+from keep_alive import keep_alive
 import random
 import sqlite3
 from datetime import datetime, time
 
 from pytz import timezone
-from telegram import Update, Audio
+from telegram import Update
 from telegram.ext import (
-    Application, CommandHandler, MessageHandler, filters, ContextTypes
+    Application, CommandHandler, MessageHandler, filters, ContextTypes,
+    ConversationHandler
 )
+from telegram.constants import ChatMemberStatus
+
+nest_asyncio.apply()
 
 # ====== تنظیمات ======
-BOT_TOKEN = 'توکن رباتت اینجا'
-CHANNEL_ID = '@channelusername'  # یا ID عددی کانال
+BOT_TOKEN = '7696809654:AAH7rg2ldVtORW3EekAGzj3xW4O58Tr7nr0'
 TEHRAN_TZ = timezone('Asia/Tehran')
 
 # ====== لاگ ======
@@ -24,81 +30,223 @@ conn = sqlite3.connect('songs.db', check_same_thread=False)
 cursor = conn.cursor()
 cursor.execute('''CREATE TABLE IF NOT EXISTS songs
                (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
                 file_id TEXT,
+                title TEXT,
                 sent INTEGER DEFAULT 0)''')
+cursor.execute('''CREATE TABLE IF NOT EXISTS users
+               (user_id INTEGER PRIMARY KEY,
+                channel_id TEXT)''')
 conn.commit()
 
+# ====== مراحل مکالمه ======
+ASK_CONFIRM_DUPLICATE = range(1)
+
 # ====== دستورات ======
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("سلام! آهنگ‌هات رو بفرست تا ذخیره کنم.")
-
-async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    file_id = update.message.audio.file_id
-    cursor.execute("INSERT INTO songs (file_id, sent) VALUES (?, 0)", (file_id,))
-    conn.commit()
-    await update.message.reply_text("آهنگ ذخیره شد.")
-
-async def list_songs(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cursor.execute("SELECT id, file_id, sent FROM songs")
-    songs = cursor.fetchall()
-    if not songs:
-        await update.message.reply_text("هنوز آهنگی ثبت نشده.")
-    else:
-        text = "\n".join([f"{s[0]} - {'ارسال‌شده' if s[2] else 'در صف'}" for s in songs])
-        await update.message.reply_text(text)
+    await update.message.reply_text(
+        "سلام! من ربات مدیریت آهنگ هستم. از دستورات زیر استفاده کن:\n"
+        "/start: شروع\n"
+        "/list: لیست آهنگ‌ها\n"
+        "/delete: حذف آهنگ\n"
+        "/setchannel: تنظیم کانال\n"
+        "/mychannel: مشاهده کانال"
+    )
 
 async def delete_song(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) == 0:
         await update.message.reply_text("لطفاً آیدی آهنگ رو وارد کن.")
         return
+    
     try:
         song_id = int(context.args[0])
-        cursor.execute("DELETE FROM songs WHERE id = ?", (song_id,))
-        conn.commit()
-        await update.message.reply_text("آهنگ حذف شد.")
+        user_id = update.effective_user.id
+        
+        cursor.execute("DELETE FROM songs WHERE id=? AND user_id=?", (song_id, user_id))
+        if cursor.rowcount > 0:
+            conn.commit()
+            await update.message.reply_text(f"آهنگ با آیدی {song_id} حذف شد.")
+        else:
+            await update.message.reply_text("آهنگی با این آیدی پیدا نشد یا متعلق به شما نیست.")
+    except ValueError:
+        await update.message.reply_text("لطفاً یک عدد معتبر وارد کنید.")
+
+async def my_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    cursor.execute("SELECT channel_id FROM users WHERE user_id=?", (user_id,))
+    result = cursor.fetchone()
+    if result:
+        await update.message.reply_text(f"کانال شما: {result[0]}")
+    else:
+        await update.message.reply_text("شما هنوز کانالی تنظیم نکرده‌اید.")
+
+async def check_bot_status(bot, channel_id):
+    try:
+        chat_member = await bot.get_chat_member(channel_id, bot.id)
+        return chat_member.status not in [ChatMemberStatus.BANNED, ChatMemberStatus.LEFT]
     except:
-        await update.message.reply_text("خطا در حذف آهنگ.")
+        return False
 
-async def clear_songs(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cursor.execute("DELETE FROM songs")
+async def set_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) == 0:
+        await update.message.reply_text("لطفاً آیدی کانال رو بعد از /setchannel بنویس.")
+        return
+    channel_id = context.args[0]
+    user_id = update.effective_user.id
+
+    try:
+        if not await check_bot_status(context.bot, channel_id):
+            await update.message.reply_text("متاسفانه ربات در کانال بن شده یا عضو نیست. لطفاً مطمئن شوید ربات در کانال عضو و ادمین است.")
+            return
+
+        member = await context.bot.get_chat_member(channel_id, user_id)
+        if member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
+            await update.message.reply_text("شما ادمین این کانال نیستید.")
+            return
+    except:
+        await update.message.reply_text("خطا در بررسی عضویت. مطمئن شو ربات داخل کاناله و ادمینه.")
+        return
+
+    cursor.execute("INSERT OR REPLACE INTO users (user_id, channel_id) VALUES (?, ?)", (user_id, channel_id))
     conn.commit()
-    await update.message.reply_text("همه آهنگ‌ها پاک شدن.")
+    await update.message.reply_text("کانال با موفقیت ثبت شد.")
 
-# ====== زمان‌بندی ارسال ======
+async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    audio = update.message.audio
+    file_id = audio.file_id
+    title = audio.title or "بدون عنوان"
 
-async def nightly_job(app: Application):
+    cursor.execute("SELECT * FROM songs WHERE user_id=? AND file_id=?", (user_id, file_id))
+    exists = cursor.fetchone()
+    if exists:
+        context.user_data["pending_file_id"] = file_id
+        context.user_data["pending_title"] = title
+        await update.message.reply_text(f"این آهنگ قبلاً ذخیره شده. آیا می‌خوای دوباره ذخیره بشه؟ (بله / خیر)")
+        return ASK_CONFIRM_DUPLICATE
+
+    cursor.execute("INSERT INTO songs (user_id, file_id, title, sent) VALUES (?, ?, ?, 0)", (user_id, file_id, title))
+    conn.commit()
+    await update.message.reply_text("آهنگ ذخیره شد.")
+
+async def confirm_duplicate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.lower()
+    user_id = update.effective_user.id
+
+    if text in ['بله', 'yes']:
+        file_id = context.user_data.get("pending_file_id")
+        title = context.user_data.get("pending_title", "بدون عنوان")
+        cursor.execute("INSERT INTO songs (user_id, file_id, title, sent) VALUES (?, ?, ?, 0)", (user_id, file_id, title))
+        conn.commit()
+        await update.message.reply_text("دوباره ذخیره شد.")
+    else:
+        await update.message.reply_text("ذخیره نشد.")
+
+    context.user_data.pop("pending_file_id", None)
+    context.user_data.pop("pending_title", None)
+    return ConversationHandler.END
+
+async def list_songs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    cursor.execute("SELECT id, title, sent FROM songs WHERE user_id=?", (user_id,))
+    songs = cursor.fetchall()
+    if not songs:
+        await update.message.reply_text("آهنگی ثبت نشده.")
+    else:
+        text = "\n".join([f"{s[0]} - {s[1]} ({'ارسال‌شده' if s[2] else 'در صف'})" for s in songs])
+        await update.message.reply_text(text)
+
+async def send_song_daily(app: Application):
     while True:
-        now = datetime.now(TEHRAN_TZ)
-        if now.time().hour == 0 and now.time().minute == 0:
-            cursor.execute("SELECT id, file_id FROM songs WHERE sent = 0")
-            songs = cursor.fetchall()
-            if songs:
+        try:
+            now = datetime.now(TEHRAN_TZ)
+            target = time(0, 0)  # ساعت ۱۲ شب
+            today_target = TEHRAN_TZ.localize(datetime.combine(now.date(), target))
+            seconds = (today_target - now).total_seconds()
+            if seconds < 0:
+                seconds += 86400  # فردا
+
+            logging.info(f"Next song sending scheduled in {int(seconds/3600)} hours and {int((seconds%3600)/60)} minutes")
+            await asyncio.sleep(seconds)
+            
+            logging.info(f"Starting daily song distribution at {now}")
+            cursor.execute("SELECT DISTINCT user_id FROM users")
+            users = cursor.fetchall()
+            
+            if not users:
+                logging.warning("No users found in database")
+                continue
+
+            for user in users:
+                user_id = user[0]
+                cursor.execute("SELECT channel_id FROM users WHERE user_id=?", (user_id,))
+                row = cursor.fetchone()
+                if not row:
+                    logging.warning(f"No channel found for user {user_id}")
+                    continue
+                    
+                channel_id = row[0]
+                logging.info(f"Processing channel {channel_id} for user {user_id}")
+                
+                # بررسی وضعیت ربات در کانال
+                if not await check_bot_status(app.bot, channel_id):
+                    logging.warning(f"Bot is banned or not member in channel {channel_id}")
+                    continue
+                
+                cursor.execute("SELECT id, file_id, title FROM songs WHERE user_id=? AND sent=0", (user_id,))
+                songs = cursor.fetchall()
+                
+                if not songs:
+                    logging.info(f"No unsent songs found for user {user_id}")
+                    continue
+                    
                 song = random.choice(songs)
                 try:
-                    await app.bot.send_audio(chat_id=CHANNEL_ID, audio=song[1])
-                    cursor.execute("UPDATE songs SET sent = 1 WHERE id = ?", (song[0],))
-                    conn.commit()
+                    logging.info(f"Attempting to send song {song[0]} ({song[2]}) to channel {channel_id}")
+                    result = await app.bot.send_audio(chat_id=channel_id, audio=song[1])
+                    
+                    if result:
+                        cursor.execute("UPDATE songs SET sent=1 WHERE id=?", (song[0],))
+                        conn.commit()
+                        logging.info(f"Successfully sent song {song[0]} to channel {channel_id}")
+                    else:
+                        logging.error(f"Failed to send song {song[0]} to channel {channel_id}")
+                        
                 except Exception as e:
-                    logging.error(f"خطا در ارسال آهنگ: {e}")
-        await asyncio.sleep(60)  # بررسی هر دقیقه
+                    logging.error(f"Error sending song {song[0]} to channel {channel_id}: {str(e)}")
+                    
+        except Exception as e:
+            logging.error(f"Error in send_song_daily: {str(e)}")
+            await asyncio.sleep(300)  # 5 دقیقه صبر می‌کنیم و دوباره تلاش می‌کنیم
 
-# ====== اجرای اصلی ======
+async def on_startup(app):
+    await app.bot.set_my_commands([
+        ("start", "شروع ربات"),
+        ("list", "لیست آهنگ‌ها"),
+        ("delete", "حذف آهنگ"),
+        ("setchannel", "تنظیم کانال"),
+        ("mychannel", "مشاهده کانال")
+    ])
 
 async def main():
-    app = Application.builder().token(BOT_TOKEN).build()
+    keep_alive()  # Move keep_alive here before creating the bot
+    app = Application.builder().token(BOT_TOKEN).post_init(on_startup).build()
+
+    conv_handler = ConversationHandler(
+        entry_points=[MessageHandler(filters.AUDIO, handle_audio)],
+        states={ASK_CONFIRM_DUPLICATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, confirm_duplicate)]},
+        fallbacks=[]
+    )
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("setchannel", set_channel))
     app.add_handler(CommandHandler("list", list_songs))
     app.add_handler(CommandHandler("delete", delete_song))
-    app.add_handler(CommandHandler("clear", clear_songs))
-    app.add_handler(MessageHandler(filters.AUDIO, handle_audio))
+    app.add_handler(CommandHandler("mychannel", my_channel))
+    app.add_handler(conv_handler)
 
-    # اجرای تسک شبانه
-    asyncio.create_task(nightly_job(app))
-
-    print("ربات فعال شد.")
+    app.create_task(send_song_daily(app))
     await app.run_polling()
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     asyncio.run(main())
