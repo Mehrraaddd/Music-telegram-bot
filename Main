@@ -11,8 +11,8 @@ from keep_alive import keep_alive
 logging.basicConfig(level=logging.INFO)
 
 # ====== تنظیمات ======
-BOT_TOKEN = 'YOUR_BOT_TOKEN'  # توکن ربات شما
-ADMIN_USER_ID = 123456789  # آیدی شما به عنوان ادمین
+BOT_TOKEN = '7696809654:AAH7rg2ldVtORW3EekAGzj3xW4O58Tr7nr0'  # توکن ربات شما
+ADMIN_USER_ID = 1890135936  # آیدی شما به عنوان ادمین
 conn = sqlite3.connect('songs.db', check_same_thread=False)
 cursor = conn.cursor()
 
